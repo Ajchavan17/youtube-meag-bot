@@ -1,0 +1,38 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.so
+
+# --- Virtual Environment ---
+.venv/
+env/
+venv/
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+
+# --- Logs ---
+*.log
+
+# --- Byte-compiled ---
+*.bak
+
+# --- Environment Variables ---
+*.env
+
+# --- Local Temp Folders ---
+temp_downloads/
+temp/
+downloads/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Project specific ---
+config.py
+mega_session.json
