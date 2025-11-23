@@ -1,5 +1,5 @@
-# Use official Python image
-FROM python:3.11-slim
+# Use Python 3.10 (Fixes the 'asyncio' crash)
+FROM python:3.10-slim
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
@@ -11,7 +11,7 @@ RUN addgroup --gid 10014 choreo && \
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies (as root)
+# Install system dependencies (ffmpeg for mp3 conversion)
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
@@ -19,23 +19,21 @@ RUN apt-get update && apt-get install -y \
 # Copy project files
 COPY . .
 
-# Grant permission to the non-root user for the app directory
+# Grant permission to the non-root user
 RUN chown -R 10014:10014 /app
 
-# Switch to the non-root user (Crucial step for Choreo)
+# Switch to the non-root user (Crucial for Choreo)
 USER 10014
 
-# Install Python dependencies
-# (We install as the user so packages end up in a place we can access,
-# or we can install as root globally before switching.
-# Installing globally as root before switching is safer for path detection.)
+# Install Python dependencies (Using the user path)
+# We temporarily switch to root to install dependencies globally to avoid path issues
 USER root
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Switch back to non-root user for runtime
 USER 10014
 
-# Expose port (Matches the "8080" you set in Choreo)
+# Expose port 8080 (Matches your Choreo Port)
 EXPOSE 8080
 
 # Run the bot
