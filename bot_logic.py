@@ -2,11 +2,12 @@ import os
 import re
 import asyncio
 import logging
-import socket  # <--- NEW IMPORT
-from threading import Thread  # <--- NEW IMPORT
+import socket
+from threading import Thread
 from typing import Dict, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
+# We remove 'from config import ...' because we will define them right here!
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -18,12 +19,24 @@ from telegram.ext import (
 from yt_dlp import YoutubeDL
 from mega import Mega
 
-from config import TELEGRAM_BOT_TOKEN, MEGA_EMAIL, MEGA_PASSWORD, DOWNLOAD_DIR
+# ------------------------------------------------------------
+# CONFIGURATION (Merged from config.py)
+# ------------------------------------------------------------
+# We use os.getenv to read the variables you set in Choreo
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+MEGA_EMAIL = os.getenv("MEGA_EMAIL")
+MEGA_PASSWORD = os.getenv("MEGA_PASSWORD")
+
+# Download directory
+DOWNLOAD_DIR = "temp_downloads"
+
+# Validation
+if not all([TELEGRAM_BOT_TOKEN, MEGA_EMAIL, MEGA_PASSWORD]):
+    print("CRITICAL ERROR: Missing Environment Variables! Check Choreo Settings.")
 
 # ------------------------------------------------------------
 # Logging Setup
 # ------------------------------------------------------------
-
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -39,12 +52,10 @@ USER_SESSIONS: Dict[int, Dict] = {}
 # HEALTH CHECK SERVER (REQUIRED FOR CHOREO)
 # ------------------------------------------------------------
 def start_health_check_server():
-    """
-    Starts a simple socket server on port 8080 to satisfy Choreo's health check.
-    """
-
     def run_server():
+        # Listen on all interfaces (0.0.0.0) on port 8080
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(('0.0.0.0', 8080))
             s.listen(1)
             logger.info("Health check server listening on port 8080")
@@ -53,12 +64,12 @@ def start_health_check_server():
                     conn, addr = s.accept()
                     with conn:
                         data = conn.recv(1024)
+                        # Simple HTTP 200 OK response
                         response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nBot is running!"
                         conn.sendall(response)
                 except Exception as e:
                     logger.error(f"Health check error: {e}")
 
-    # Run in a separate background thread
     t = Thread(target=run_server, daemon=True)
     t.start()
 
@@ -66,20 +77,15 @@ def start_health_check_server():
 # ------------------------------------------------------------
 # MEGA LOGIN
 # ------------------------------------------------------------
-
 def mega_login():
     mega = Mega()
     return mega.login(MEGA_EMAIL, MEGA_PASSWORD)
 
 
 # ------------------------------------------------------------
-# MEGA FOLDER TREE — FULL & ACCURATE
+# MEGA FOLDER TREE
 # ------------------------------------------------------------
-
 def build_folder_tree() -> List[Tuple[str, str]]:
-    """
-    Returns list of (full_path, node_id)
-    """
     try:
         m = mega_login()
     except Exception as e:
@@ -92,7 +98,6 @@ def build_folder_tree() -> List[Tuple[str, str]]:
         logger.exception("m.get_files() failed")
         return []
 
-    # Extract only folders (t == 1)
     folder_nodes = {
         nid: meta
         for nid, meta in files.items()
@@ -108,7 +113,6 @@ def build_folder_tree() -> List[Tuple[str, str]]:
         if not name:
             continue
 
-        # Build full folder path
         parts = [name]
         current_parent = parent
 
@@ -122,17 +126,14 @@ def build_folder_tree() -> List[Tuple[str, str]]:
         full_path = "/".join(parts)
         folder_paths.append((full_path, nid))
 
-    # Remove duplicates + sort
-    folder_paths = sorted(list(set(folder_paths)), key=lambda x: x[0])
-
-    return folder_paths
+    return sorted(list(set(folder_paths)), key=lambda x: x[0])
 
 
 # ------------------------------------------------------------
-# FIXED — RELIABLE MP3 OUTPUT DETECTION
+# DOWNLOAD MP3
 # ------------------------------------------------------------
-
 def download_mp3(url: str) -> str:
+    # Ensure directory exists (Permissions fixed in Dockerfile)
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
     ydl_opts = {
@@ -153,7 +154,6 @@ def download_mp3(url: str) -> str:
     with YoutubeDL(ydl_opts) as ydl:
         ydl.extract_info(url, download=True)
 
-    # RETURN NEWEST MP3 FILE (most reliable method)
     mp3_files = [
         os.path.join(DOWNLOAD_DIR, f)
         for f in os.listdir(DOWNLOAD_DIR)
@@ -168,9 +168,8 @@ def download_mp3(url: str) -> str:
 
 
 # ------------------------------------------------------------
-# Telegram: /start
+# TELEGRAM HANDLERS
 # ------------------------------------------------------------
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Welcome!*\n\n"
@@ -178,10 +177,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-
-# ------------------------------------------------------------
-# Telegram: /uploadtomega
-# ------------------------------------------------------------
 
 async def uploadtomega(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -195,7 +190,6 @@ async def uploadtomega(update: Update, context: ContextTypes.DEFAULT_TYPE):
     USER_SESSIONS[uid] = {"url": yt_url}
 
     msg = await update.message.reply_text("📂 Fetching MEGA folders... ⏳")
-
     loop = asyncio.get_event_loop()
 
     try:
@@ -227,10 +221,6 @@ async def uploadtomega(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Error fetching MEGA folders:\n`{e}`", parse_mode="Markdown")
 
 
-# ------------------------------------------------------------
-# Telegram: Callback Handler
-# ------------------------------------------------------------
-
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -248,9 +238,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     yt_url = sess["url"]
-
     await query.edit_message_text("🎬 Downloading MP3... ⏳")
-
     loop = asyncio.get_event_loop()
 
     try:
@@ -272,7 +260,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-        # Delete local MP3 file
         if os.path.exists(mp3_path):
             os.remove(mp3_path)
 
@@ -284,16 +271,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ------------------------------------------------------------
-# Run Bot
+# MAIN
 # ------------------------------------------------------------
-
 def main():
-    # 1. Start the dummy health check server in the background
     start_health_check_server()
 
-    # 2. Start the Telegram Bot
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("Bot token missing! Exiting.")
+        return
 
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("uploadtomega", uploadtomega))
     app.add_handler(CallbackQueryHandler(callback_handler))
