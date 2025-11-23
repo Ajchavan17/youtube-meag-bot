@@ -2,12 +2,11 @@ import os
 import re
 import asyncio
 import logging
-import socket
-from threading import Thread
+import socket  # <-- REQUIRED FOR HEALTH CHECK
+from threading import Thread  # <-- REQUIRED FOR HEALTH CHECK
 from typing import Dict, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
-# We remove 'from config import ...' because we will define them right here!
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -20,14 +19,11 @@ from yt_dlp import YoutubeDL
 from mega import Mega
 
 # ------------------------------------------------------------
-# CONFIGURATION (Merged from config.py)
+# CONFIGURATION (Reads from Choreo Environment Variables)
 # ------------------------------------------------------------
-# We use os.getenv to read the variables you set in Choreo
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MEGA_EMAIL = os.getenv("MEGA_EMAIL")
 MEGA_PASSWORD = os.getenv("MEGA_PASSWORD")
-
-# Download directory
 DOWNLOAD_DIR = "temp_downloads"
 
 # Validation
@@ -49,30 +45,35 @@ USER_SESSIONS: Dict[int, Dict] = {}
 
 
 # ------------------------------------------------------------
-# HEALTH CHECK SERVER (REQUIRED FOR CHOREO)
+# HEALTH CHECK SERVER (CRUCIAL FOR CHOREO DEPLOYMENT)
 # ------------------------------------------------------------
 def start_health_check_server():
+    """Starts a simple socket server in a thread to respond to platform health checks on port 8080."""
+    # Read port from environment variable, default to 8080 as per Dockerfile
+    PORT = int(os.getenv("PORT", 8080))
+
     def run_server():
-        # Listen on all interfaces (0.0.0.0) on port 8080
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(('0.0.0.0', 8080))
-            s.listen(1)
-            logger.info("Health check server listening on port 8080")
-            while True:
-                try:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(('0.0.0.0', PORT))
+                s.listen(1)
+                logger.info(f"Health check server listening on port {PORT}")
+                while True:
                     conn, addr = s.accept()
                     with conn:
                         data = conn.recv(1024)
-                        # Simple HTTP 200 OK response
+                        # Respond with simple HTTP 200 OK
                         response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nBot is running!"
                         conn.sendall(response)
-                except Exception as e:
-                    logger.error(f"Health check error: {e}")
+        except Exception as e:
+            logger.error(f"Health check server crashed: {e}")
 
     t = Thread(target=run_server, daemon=True)
     t.start()
 
+
+# ------------------------------------------------------------
 
 # ------------------------------------------------------------
 # MEGA LOGIN
@@ -133,7 +134,6 @@ def build_folder_tree() -> List[Tuple[str, str]]:
 # DOWNLOAD MP3
 # ------------------------------------------------------------
 def download_mp3(url: str) -> str:
-    # Ensure directory exists (Permissions fixed in Dockerfile)
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
     ydl_opts = {
@@ -274,6 +274,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # ------------------------------------------------------------
 def main():
+    # START THE HEALTH CHECK FIRST
     start_health_check_server()
 
     if not TELEGRAM_BOT_TOKEN:
@@ -286,6 +287,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     logger.info("Bot running...")
+    # This call is blocking and will keep the main thread alive
     app.run_polling()
 
 
