@@ -2,6 +2,8 @@ import os
 import re
 import asyncio
 import logging
+import socket  # <--- NEW IMPORT
+from threading import Thread  # <--- NEW IMPORT
 from typing import Dict, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
@@ -18,7 +20,6 @@ from mega import Mega
 
 from config import TELEGRAM_BOT_TOKEN, MEGA_EMAIL, MEGA_PASSWORD, DOWNLOAD_DIR
 
-
 # ------------------------------------------------------------
 # Logging Setup
 # ------------------------------------------------------------
@@ -32,6 +33,34 @@ logger = logging.getLogger(__name__)
 executor = ThreadPoolExecutor(max_workers=4)
 
 USER_SESSIONS: Dict[int, Dict] = {}
+
+
+# ------------------------------------------------------------
+# HEALTH CHECK SERVER (REQUIRED FOR CHOREO)
+# ------------------------------------------------------------
+def start_health_check_server():
+    """
+    Starts a simple socket server on port 8080 to satisfy Choreo's health check.
+    """
+
+    def run_server():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('0.0.0.0', 8080))
+            s.listen(1)
+            logger.info("Health check server listening on port 8080")
+            while True:
+                try:
+                    conn, addr = s.accept()
+                    with conn:
+                        data = conn.recv(1024)
+                        response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nBot is running!"
+                        conn.sendall(response)
+                except Exception as e:
+                    logger.error(f"Health check error: {e}")
+
+    # Run in a separate background thread
+    t = Thread(target=run_server, daemon=True)
+    t.start()
 
 
 # ------------------------------------------------------------
@@ -50,11 +79,7 @@ def mega_login():
 def build_folder_tree() -> List[Tuple[str, str]]:
     """
     Returns list of (full_path, node_id)
-    Example:
-        ("Music", "HKFDSf3")
-        ("Music/Bollywood", "FDSF323")
     """
-
     try:
         m = mega_login()
     except Exception as e:
@@ -248,7 +273,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         # Delete local MP3 file
-        os.remove(mp3_path)
+        if os.path.exists(mp3_path):
+            os.remove(mp3_path)
 
     except Exception as e:
         logger.exception(e)
@@ -262,6 +288,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ------------------------------------------------------------
 
 def main():
+    # 1. Start the dummy health check server in the background
+    start_health_check_server()
+
+    # 2. Start the Telegram Bot
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
