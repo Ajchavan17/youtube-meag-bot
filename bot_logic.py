@@ -2,8 +2,9 @@ import os
 import re
 import asyncio
 import logging
-import socket  # <-- REQUIRED FOR HEALTH CHECK
-from threading import Thread  # <-- REQUIRED FOR HEALTH CHECK
+import socket
+import time  # <--- NEW: Import time
+from threading import Thread
 from typing import Dict, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
@@ -26,7 +27,6 @@ MEGA_EMAIL = os.getenv("MEGA_EMAIL")
 MEGA_PASSWORD = os.getenv("MEGA_PASSWORD")
 DOWNLOAD_DIR = "temp_downloads"
 
-# Validation
 if not all([TELEGRAM_BOT_TOKEN, MEGA_EMAIL, MEGA_PASSWORD]):
     print("CRITICAL ERROR: Missing Environment Variables! Check Choreo Settings.")
 
@@ -49,7 +49,6 @@ USER_SESSIONS: Dict[int, Dict] = {}
 # ------------------------------------------------------------
 def start_health_check_server():
     """Starts a simple socket server in a thread to respond to platform health checks on port 8080."""
-    # Read port from environment variable, default to 8080 as per Dockerfile
     PORT = int(os.getenv("PORT", 8080))
 
     def run_server():
@@ -67,7 +66,8 @@ def start_health_check_server():
                         response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nBot is running!"
                         conn.sendall(response)
         except Exception as e:
-            logger.error(f"Health check server crashed: {e}")
+            # We use logger.exception here to get a full stack trace if this crashes
+            logger.exception(f"Health check server crashed unexpectedly.")
 
     t = Thread(target=run_server, daemon=True)
     t.start()
@@ -277,6 +277,9 @@ def main():
     # START THE HEALTH CHECK FIRST
     start_health_check_server()
 
+    # NEW LINE: Give the health check thread time to bind the port and be ready
+    time.sleep(2)
+
     if not TELEGRAM_BOT_TOKEN:
         logger.error("Bot token missing! Exiting.")
         return
@@ -287,7 +290,6 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     logger.info("Bot running...")
-    # This call is blocking and will keep the main thread alive
     app.run_polling()
 
 
