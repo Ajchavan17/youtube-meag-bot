@@ -1,8 +1,9 @@
 import os
+import sys
 import asyncio
 import logging
 from threading import Thread
-from http.server import HTTPServer, BaseHTTPRequestHandler # <--- NEW: Standard HTTP Server
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
@@ -13,17 +14,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
 )
-
 from yt_dlp import YoutubeDL
 from mega import Mega
-
-# ------------------------------------------------------------
-# CONFIGURATION
-# ------------------------------------------------------------
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-MEGA_EMAIL = os.getenv("MEGA_EMAIL")
-MEGA_PASSWORD = os.getenv("MEGA_PASSWORD")
-DOWNLOAD_DIR = "temp_downloads"
 
 # ------------------------------------------------------------
 # LOGGING SETUP
@@ -31,40 +23,51 @@ DOWNLOAD_DIR = "temp_downloads"
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
+    stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
 
-executor = ThreadPoolExecutor(max_workers=4)
-USER_SESSIONS: Dict[int, Dict] = {}
+# ------------------------------------------------------------
+# CONFIGURATION
+# ------------------------------------------------------------
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+MEGA_EMAIL = os.getenv("MEGA_EMAIL")
+MEGA_PASSWORD = os.getenv("MEGA_PASSWORD")
+
+# [FIX] Use the system temporary directory which is writable
+DOWNLOAD_DIR = "/tmp"
 
 # ------------------------------------------------------------
-# ROBUST HEALTH CHECK SERVER (Fixes Choreo Termination)
+# HEALTH CHECK SERVER
 # ------------------------------------------------------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        """Respond to Choreo's HTTP health checks"""
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"OK")
-
-    # Suppress log messages to keep console clean
     def log_message(self, format, *args):
         pass
 
 def start_health_check_server():
     port = int(os.getenv("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    
-    def run_server():
-        logger.info(f"Health check server running on port {port}")
-        server.serve_forever()
+    try:
+        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+        def run_server():
+            logger.info(f"✅ Health check server listening on port {port}")
+            server.serve_forever()
+        t = Thread(target=run_server, daemon=True)
+        t.start()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to start health check server: {e}")
+        return False
 
-    t = Thread(target=run_server, daemon=True)
-    t.start()
+executor = ThreadPoolExecutor(max_workers=4)
+USER_SESSIONS: Dict[int, Dict] = {}
 
 # ------------------------------------------------------------
-# MEGA & YOUTUBE LOGIC
+# LOGIC
 # ------------------------------------------------------------
 def mega_login():
     mega = Mega()
@@ -99,9 +102,12 @@ def build_folder_tree() -> List[Tuple[str, str]]:
     return sorted(list(set(folder_paths)), key=lambda x: x[0])
 
 def download_mp3(url: str) -> str:
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    # Ensure no sub-folders are created that might fail permissions
+    # We save directly to /tmp
+    
     ydl_opts = {
         "format": "bestaudio/best",
+        # Save file to /tmp/Title.mp3
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s"),
         "quiet": False,
         "noplaylist": True,
@@ -111,13 +117,16 @@ def download_mp3(url: str) -> str:
     with YoutubeDL(ydl_opts) as ydl:
         ydl.extract_info(url, download=True)
 
+    # Find the file we just downloaded in /tmp
     mp3_files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) if f.lower().endswith(".mp3")]
     if not mp3_files: raise RuntimeError("MP3 output not found.")
+    
+    # Get the newest file
     mp3_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
     return mp3_files[0]
 
 # ------------------------------------------------------------
-# BOT HANDLERS
+# HANDLERS
 # ------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 *Welcome!*\nUse `/uploadtomega <URL>`", parse_mode="Markdown")
@@ -161,32 +170,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_event_loop()
     
     try:
+        # This will now save to /tmp (Writable)
         mp3_path = await loop.run_in_executor(executor, download_mp3, sess["url"])
-        await query.edit_message_text(f"☁️ Uploading to `{folder_path}`... ⏳", parse_mode="Markdown")
         
+        await query.edit_message_text(f"☁️ Uploading to `{folder_path}`... ⏳", parse_mode="Markdown")
         mega = mega_login()
         mega.upload(mp3_path, nodeid)
         
         await query.edit_message_text(f"✅ *Done!*\nFile: `{os.path.basename(mp3_path)}`", parse_mode="Markdown")
+        
+        # Clean up the file from /tmp
         if os.path.exists(mp3_path): os.remove(mp3_path)
     except Exception as e:
-        logger.exception(e)
+        logger.exception("Task Failed")
         await query.edit_message_text(f"❌ Failed: {e}")
     
     USER_SESSIONS.pop(uid, None)
 
 # ------------------------------------------------------------
-# MAIN
+# RUN
 # ------------------------------------------------------------
 def main():
-    # 1. Start the robust HTTP Health Check Server
     start_health_check_server()
     
     if not TELEGRAM_BOT_TOKEN:
         logger.error("Bot token missing!")
         return
 
-    # 2. Run the Bot
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("uploadtomega", uploadtomega))
