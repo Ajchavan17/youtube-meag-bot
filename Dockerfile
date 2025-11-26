@@ -11,10 +11,16 @@ RUN addgroup --gid 10014 choreo && \
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
-# ffmpeg is required for the YouTube-to-MP3 conversion
-RUN apt-get update && apt-get install -y \
+# Install required system dependencies:
+# - ffmpeg: For YouTube-to-MP3 conversion.
+# - git: CRUCIAL for installing packages directly from GitHub (like yt-dlp).
+# - python3-dev & build-essential: Required to compile certain Python packages with C/C++ extensions.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    git \
+    python3-dev \
+    build-essential \
+    # Clean up APT lists to keep the image small
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project files
@@ -27,7 +33,7 @@ RUN chown -R 10014:10014 /app
 USER 10014
 
 # Install Python dependencies as the user
-# We temporarily switch to root to install globally, then switch back
+# You temporarily switch to root to run pip install
 USER root
 RUN pip install --no-cache-dir -r requirements.txt
 
