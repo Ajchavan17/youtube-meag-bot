@@ -1,10 +1,9 @@
 import os
-import re
+import sys
 import asyncio
 import logging
-import socket
-import time  # <--- NEW: Import time
 from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
@@ -15,127 +14,103 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
 )
-
 from yt_dlp import YoutubeDL
 from mega import Mega
 
 # ------------------------------------------------------------
-# CONFIGURATION (Reads from Choreo Environment Variables)
-# ------------------------------------------------------------
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-MEGA_EMAIL = os.getenv("MEGA_EMAIL")
-MEGA_PASSWORD = os.getenv("MEGA_PASSWORD")
-DOWNLOAD_DIR = "temp_downloads"
-
-if not all([TELEGRAM_BOT_TOKEN, MEGA_EMAIL, MEGA_PASSWORD]):
-    print("CRITICAL ERROR: Missing Environment Variables! Check Choreo Settings.")
-
-# ------------------------------------------------------------
-# Logging Setup
+# LOGGING SETUP (Global)
 # ------------------------------------------------------------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
+    stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
 
-executor = ThreadPoolExecutor(max_workers=4)
+# ------------------------------------------------------------
+# CONFIGURATION
+# ------------------------------------------------------------
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+MEGA_EMAIL = os.getenv("MEGA_EMAIL")
+MEGA_PASSWORD = os.getenv("MEGA_PASSWORD")
+# FIXED: Use the system temporary directory which is writable
+DOWNLOAD_DIR = "/tmp"
 
+
+# ------------------------------------------------------------
+# HEALTH CHECK SERVER (For Choreo)
+# ------------------------------------------------------------
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        pass  # Suppress log messages
+
+
+def start_health_check_server():
+    port = int(os.getenv("PORT", 8080))
+    try:
+        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+
+        def run_server():
+            logger.info(f"✅ Health check server listening on port {port}")
+            server.serve_forever()
+
+        t = Thread(target=run_server, daemon=True)
+        t.start()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to start health check server: {e}")
+        return False
+
+
+executor = ThreadPoolExecutor(max_workers=4)
 USER_SESSIONS: Dict[int, Dict] = {}
 
 
 # ------------------------------------------------------------
-# HEALTH CHECK SERVER (CRUCIAL FOR CHOREO DEPLOYMENT)
-# ------------------------------------------------------------
-def start_health_check_server():
-    """Starts a simple socket server in a thread to respond to platform health checks on port 8080."""
-    PORT = int(os.getenv("PORT", 8080))
-
-    def run_server():
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind(('0.0.0.0', PORT))
-                s.listen(1)
-                logger.info(f"Health check server listening on port {PORT}")
-                while True:
-                    conn, addr = s.accept()
-                    with conn:
-                        data = conn.recv(1024)
-                        # Respond with simple HTTP 200 OK
-                        response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nBot is running!"
-                        conn.sendall(response)
-        except Exception as e:
-            # We use logger.exception here to get a full stack trace if this crashes
-            logger.exception(f"Health check server crashed unexpectedly.")
-
-    t = Thread(target=run_server, daemon=True)
-    t.start()
-
-
-# ------------------------------------------------------------
-
-# ------------------------------------------------------------
-# MEGA LOGIN
+# LOGIC
 # ------------------------------------------------------------
 def mega_login():
     mega = Mega()
     return mega.login(MEGA_EMAIL, MEGA_PASSWORD)
 
 
-# ------------------------------------------------------------
-# MEGA FOLDER TREE
-# ------------------------------------------------------------
 def build_folder_tree() -> List[Tuple[str, str]]:
     try:
         m = mega_login()
-    except Exception as e:
-        logger.exception("MEGA login failed")
-        return []
-
-    try:
         files = m.get_files()
     except Exception as e:
-        logger.exception("m.get_files() failed")
+        logger.exception("MEGA Error")
         return []
 
-    folder_nodes = {
-        nid: meta
-        for nid, meta in files.items()
-        if meta.get("t") == 1
-    }
-
+    folder_nodes = {nid: meta for nid, meta in files.items() if meta.get("t") == 1}
     folder_paths = []
 
     for nid, meta in folder_nodes.items():
         name = meta.get("a", {}).get("n")
         parent = meta.get("p")
-
-        if not name:
-            continue
+        if not name: continue
 
         parts = [name]
         current_parent = parent
-
         while current_parent and current_parent in folder_nodes:
             pname = folder_nodes[current_parent].get("a", {}).get("n")
-            if pname:
-                parts.append(pname)
+            if pname: parts.append(pname)
             current_parent = folder_nodes[current_parent].get("p")
 
         parts.reverse()
-        full_path = "/".join(parts)
-        folder_paths.append((full_path, nid))
+        folder_paths.append(("/".join(parts), nid))
 
     return sorted(list(set(folder_paths)), key=lambda x: x[0])
 
 
-# ------------------------------------------------------------
-# DOWNLOAD MP3
-# ------------------------------------------------------------
 def download_mp3(url: str) -> str:
     # Define the path to the cookies file
-    # (Assumes cookies.txt is in the same folder as this script)
     cookies_path = "cookies.txt"
 
     ydl_opts = {
@@ -144,12 +119,11 @@ def download_mp3(url: str) -> str:
         "quiet": False,
         "noplaylist": True,
         "no_check_certificate": True,
-        # [NEW] Add the cookies file here
+        # NEW: Use cookies for YouTube access
         "cookiefile": cookies_path,
         "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
     }
 
-    # Check if cookies file exists to avoid crashes
     if not os.path.exists(cookies_path):
         logger.warning(f"⚠️ cookies.txt not found at {cookies_path}. YouTube might block the download.")
 
@@ -164,120 +138,78 @@ def download_mp3(url: str) -> str:
 
 
 # ------------------------------------------------------------
-# TELEGRAM HANDLERS
+# HANDLERS
 # ------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 *Welcome!*\n\n"
-        "Use `/uploadtomega <YouTube URL>` to download MP3 and upload to MEGA.",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("👋 *Welcome!*\nUse `/uploadtomega <URL>`", parse_mode="Markdown")
 
 
 async def uploadtomega(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    uid = user.id
-
     if not context.args:
-        await update.message.reply_text("⚠️ Usage: `/uploadtomega <YouTube URL>`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Usage: `/uploadtomega <YouTube URL>`")
         return
 
-    yt_url = context.args[0].strip()
-    USER_SESSIONS[uid] = {"url": yt_url}
-
+    USER_SESSIONS[user.id] = {"url": context.args[0].strip()}
     msg = await update.message.reply_text("📂 Fetching MEGA folders... ⏳")
-    loop = asyncio.get_event_loop()
 
+    loop = asyncio.get_event_loop()
     try:
         folders = await loop.run_in_executor(executor, build_folder_tree)
-
         if not folders:
-            await msg.edit_text("⚠️ No folders found in MEGA account.")
+            await msg.edit_text("⚠️ No MEGA folders found.")
             return
 
-        USER_SESSIONS[uid]["folders"] = folders
-
-        keyboard = []
-        for path, nid in folders:
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"📁 {path}",
-                    callback_data=f"choose|{uid}|{nid}|{path}"
-                )
-            ])
-
-        await msg.edit_text(
-            "📁 *Select MEGA Folder:*",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-
+        USER_SESSIONS[user.id]["folders"] = folders
+        keyboard = [[InlineKeyboardButton(f"📁 {path}", callback_data=f"choose|{user.id}|{nid}|{path}")] for path, nid in
+                    folders]
+        await msg.edit_text("📁 *Select Folder:*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except Exception as e:
-        logger.exception(e)
-        await msg.edit_text(f"❌ Error fetching MEGA folders:\n`{e}`", parse_mode="Markdown")
+        await msg.edit_text(f"❌ Error: {e}")
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     try:
-        action, uid, nodeid, folder_path = query.data.split("|")
+        _, uid, nodeid, folder_path = query.data.split("|")
         uid = int(uid)
-    except ValueError:
-        await query.edit_message_text("⚠️ Invalid selection data.")
+    except:
         return
 
     sess = USER_SESSIONS.get(uid)
     if not sess:
-        await query.edit_message_text("⚠️ Session expired. Run /uploadtomega again.")
+        await query.edit_message_text("⚠️ Session expired.")
         return
 
-    yt_url = sess["url"]
     await query.edit_message_text("🎬 Downloading MP3... ⏳")
     loop = asyncio.get_event_loop()
 
     try:
-        mp3_path = await loop.run_in_executor(executor, download_mp3, yt_url)
-    except Exception as e:
-        await query.edit_message_text(f"❌ YouTube download failed:\n`{e}`", parse_mode="Markdown")
-        return
+        mp3_path = await loop.run_in_executor(executor, download_mp3, sess["url"])
 
-    await query.edit_message_text(f"☁️ Uploading to MEGA folder: `{folder_path}`... ⏳", parse_mode="Markdown")
-
-    try:
+        await query.edit_message_text(f"☁️ Uploading to `{folder_path}`... ⏳", parse_mode="Markdown")
         mega = mega_login()
         mega.upload(mp3_path, nodeid)
 
-        await query.edit_message_text(
-            f"✅ *Upload Complete!*\n\n"
-            f"📄 File: `{os.path.basename(mp3_path)}`\n"
-            f"📁 Folder: `{folder_path}`",
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text(f"✅ *Done!*\nFile: `{os.path.basename(mp3_path)}`", parse_mode="Markdown")
 
-        if os.path.exists(mp3_path):
-            os.remove(mp3_path)
-
+        if os.path.exists(mp3_path): os.remove(mp3_path)
     except Exception as e:
-        logger.exception(e)
-        await query.edit_message_text(f"❌ Upload failed:\n`{e}`", parse_mode="Markdown")
+        logger.exception("Task Failed")
+        await query.edit_message_text(f"❌ Failed: {e}")
 
     USER_SESSIONS.pop(uid, None)
 
 
 # ------------------------------------------------------------
-# MAIN
+# RUN
 # ------------------------------------------------------------
 def main():
-    # START THE HEALTH CHECK FIRST
     start_health_check_server()
 
-    # NEW LINE: Give the health check thread time to bind the port and be ready
-    time.sleep(2)
-
     if not TELEGRAM_BOT_TOKEN:
-        logger.error("Bot token missing! Exiting.")
+        logger.error("Bot token missing!")
         return
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -285,7 +217,7 @@ def main():
     app.add_handler(CommandHandler("uploadtomega", uploadtomega))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("Bot running...")
+    logger.info("Bot is polling...")
     app.run_polling()
 
 
