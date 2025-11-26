@@ -1,5 +1,7 @@
 python-telegram-bot==21.1
-yt-dlp
+# Force install the latest development version of yt-dlp
+git+https://github.com/yt-dlp/yt-dlp.git@master
 python-dotenv
 pycryptodome
 mega.py==1.0.8
+tenacity

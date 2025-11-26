@@ -134,7 +134,9 @@ def build_folder_tree() -> List[Tuple[str, str]]:
 # DOWNLOAD MP3
 # ------------------------------------------------------------
 def download_mp3(url: str) -> str:
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    # Define the path to the cookies file
+    # (Assumes cookies.txt is in the same folder as this script)
+    cookies_path = "cookies.txt"
 
     ydl_opts = {
         "format": "bestaudio/best",
@@ -142,26 +144,20 @@ def download_mp3(url: str) -> str:
         "quiet": False,
         "noplaylist": True,
         "no_check_certificate": True,
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
-        ],
+        # [NEW] Add the cookies file here
+        "cookiefile": cookies_path,
+        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
     }
+
+    # Check if cookies file exists to avoid crashes
+    if not os.path.exists(cookies_path):
+        logger.warning(f"⚠️ cookies.txt not found at {cookies_path}. YouTube might block the download.")
 
     with YoutubeDL(ydl_opts) as ydl:
         ydl.extract_info(url, download=True)
 
-    mp3_files = [
-        os.path.join(DOWNLOAD_DIR, f)
-        for f in os.listdir(DOWNLOAD_DIR)
-        if f.lower().endswith(".mp3")
-    ]
-
-    if not mp3_files:
-        raise RuntimeError("MP3 output not found.")
+    mp3_files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) if f.lower().endswith(".mp3")]
+    if not mp3_files: raise RuntimeError("MP3 output not found.")
 
     mp3_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
     return mp3_files[0]
