@@ -203,7 +203,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ------------------------------------------------------------
-# RUN
+# RUN (MODIFIED)
 # ------------------------------------------------------------
 def main():
     start_health_check_server()
@@ -212,13 +212,19 @@ def main():
         logger.error("Bot token missing!")
         return
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("uploadtomega", uploadtomega))
-    app.add_handler(CallbackQueryHandler(callback_handler))
+    # --- CRUCIAL FIX: Wrap the entire application run in a try/except ---
+    try:
+        app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("uploadtomega", uploadtomega))
+        app.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("Bot is polling...")
-    app.run_polling()
+        logger.info("Bot is polling...")
+        app.run_polling()
+
+    except Exception as e:
+        # This will catch ANY unhandled exception, log the full traceback, and then exit.
+        logger.error("🚨 FATAL UNCAUGHT EXCEPTION: The application has crashed!", exc_info=True)
 
 
 if __name__ == "__main__":
