@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil  # <--- NEW: To copy files
 import asyncio
 import logging
 from threading import Thread
@@ -18,7 +19,7 @@ from yt_dlp import YoutubeDL
 from mega import Mega
 
 # ------------------------------------------------------------
-# LOGGING SETUP (Global)
+# LOGGING SETUP
 # ------------------------------------------------------------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -33,12 +34,11 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MEGA_EMAIL = os.getenv("MEGA_EMAIL")
 MEGA_PASSWORD = os.getenv("MEGA_PASSWORD")
-# FIXED: Use the system temporary directory which is writable
 DOWNLOAD_DIR = "/tmp"
 
 
 # ------------------------------------------------------------
-# HEALTH CHECK SERVER (For Choreo)
+# HEALTH CHECK SERVER
 # ------------------------------------------------------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -48,7 +48,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
     def log_message(self, format, *args):
-        pass  # Suppress log messages
+        pass
 
 
 def start_health_check_server():
@@ -110,8 +110,24 @@ def build_folder_tree() -> List[Tuple[str, str]]:
 
 
 def download_mp3(url: str) -> str:
-    # Define the path to the cookies file
-    cookies_path = "cookies.txt"
+    # 1. Handle Cookies
+    # We copy the read-only 'cookies.txt' to '/tmp/cookies.txt' so yt-dlp can write to it
+    source_cookies = "cookies.txt"
+    writable_cookies = os.path.join(DOWNLOAD_DIR, "cookies.txt")
+
+    cookie_arg = None
+
+    if os.path.exists(source_cookies):
+        try:
+            # Always overwrite the temp one with the fresh one from repo to start clean
+            shutil.copy(source_cookies, writable_cookies)
+            cookie_arg = writable_cookies
+            logger.info(f"Cookies copied to {writable_cookies}")
+        except Exception as e:
+            logger.error(f"Failed to copy cookies: {e}")
+            cookie_arg = source_cookies  # Fallback (might crash if it tries to write)
+    else:
+        logger.warning("⚠️ cookies.txt not found! YouTube might block download.")
 
     ydl_opts = {
         "format": "bestaudio/best",
@@ -119,13 +135,9 @@ def download_mp3(url: str) -> str:
         "quiet": False,
         "noplaylist": True,
         "no_check_certificate": True,
-        # NEW: Use cookies for YouTube access
-        "cookiefile": cookies_path,
+        "cookiefile": cookie_arg,  # Use the writable path
         "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
     }
-
-    if not os.path.exists(cookies_path):
-        logger.warning(f"⚠️ cookies.txt not found at {cookies_path}. YouTube might block the download.")
 
     with YoutubeDL(ydl_opts) as ydl:
         ydl.extract_info(url, download=True)
@@ -203,7 +215,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ------------------------------------------------------------
-# RUN (MODIFIED)
+# RUN
 # ------------------------------------------------------------
 def main():
     start_health_check_server()
@@ -212,19 +224,13 @@ def main():
         logger.error("Bot token missing!")
         return
 
-    # --- CRUCIAL FIX: Wrap the entire application run in a try/except ---
-    try:
-        app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("uploadtomega", uploadtomega))
-        app.add_handler(CallbackQueryHandler(callback_handler))
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("uploadtomega", uploadtomega))
+    app.add_handler(CallbackQueryHandler(callback_handler))
 
-        logger.info("Bot is polling...")
-        app.run_polling()
-
-    except Exception as e:
-        # This will catch ANY unhandled exception, log the full traceback, and then exit.
-        logger.error("🚨 FATAL UNCAUGHT EXCEPTION: The application has crashed!", exc_info=True)
+    logger.info("Bot is polling...")
+    app.run_polling()
 
 
 if __name__ == "__main__":
