@@ -18,6 +18,11 @@ from telegram.ext import (
 from yt_dlp import YoutubeDL
 from mega import Mega
 
+
+DOWNLOAD_DIR = "/tmp"  # Choreo safe folder
+if not os.path.exists(DOWNLOAD_DIR):
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
 # ------------------------------------------------------------
 # LOGGING SETUP
 # ------------------------------------------------------------
@@ -110,40 +115,65 @@ def build_folder_tree() -> List[Tuple[str, str]]:
 
 
 def download_mp3(url: str) -> str:
-    # 1. Handle Cookies
-    # We copy the read-only 'cookies.txt' to '/tmp/cookies.txt' so yt-dlp can write to it
     source_cookies = "cookies.txt"
     writable_cookies = os.path.join(DOWNLOAD_DIR, "cookies.txt")
 
     cookie_arg = None
 
+    # ----------------------------
+    # SAFE BINARY COPY (Choreo fix)
+    # ----------------------------
     if os.path.exists(source_cookies):
         try:
-            # Always overwrite the temp one with the fresh one from repo to start clean
-            shutil.copy(source_cookies, writable_cookies)
+            with open(source_cookies, "rb") as src, open(writable_cookies, "wb") as dst:
+                dst.write(src.read())
             cookie_arg = writable_cookies
-            logger.info(f"Cookies copied to {writable_cookies}")
+            logger.info(f"Cookies copied (binary) to {writable_cookies}")
         except Exception as e:
-            logger.error(f"Failed to copy cookies: {e}")
-            cookie_arg = source_cookies  # Fallback (might crash if it tries to write)
+            logger.error(f"Failed to binary-copy cookies: {e}")
     else:
-        logger.warning("⚠️ cookies.txt not found! YouTube might block download.")
+        logger.warning("⚠️ cookies.txt not found! Download may be limited.")
 
+    # ----------------------------
+    # YTDLP OPTIONS (Safe for cloud)
+    # ----------------------------
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s"),
         "quiet": False,
         "noplaylist": True,
         "no_check_certificate": True,
-        "cookiefile": cookie_arg,  # Use the writable path
-        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+
+        # COOKIE FIXES
+        "cookiefile": cookie_arg,
+        "no_write_cookies": True,   # IMPORTANT: prevents yt-dlp from corrupting cookies
+        "ignoreerrors": True,
+
+        # AUDIO CONVERSION
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192"
+        }],
     }
 
+    # ----------------------------
+    # DOWNLOAD
+    # ----------------------------
     with YoutubeDL(ydl_opts) as ydl:
         ydl.extract_info(url, download=True)
 
-    mp3_files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) if f.lower().endswith(".mp3")]
-    if not mp3_files: raise RuntimeError("MP3 output not found.")
+    # ----------------------------
+    # FIND THE DOWNLOADED MP3
+    # ----------------------------
+    mp3_files = [
+        os.path.join(DOWNLOAD_DIR, f)
+        for f in os.listdir(DOWNLOAD_DIR)
+        if f.lower().endswith(".mp3")
+    ]
+
+    if not mp3_files:
+        raise RuntimeError("MP3 output not found after yt-dlp download.")
 
     mp3_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
     return mp3_files[0]
